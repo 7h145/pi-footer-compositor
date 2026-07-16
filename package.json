@@ -1,0 +1,23 @@
+{
+  "name": "pi-footer-compositor",
+  "version": "0.1.0",
+  "description": "Compose extension status segments into Pi's built-in footer.",
+  "type": "module",
+  "license": "CC-BY-4.0",
+  "keywords": ["pi-package", "pi", "footer", "status", "tui"],
+  "pi": {
+    "extensions": ["./pi-footer-compositor.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.4",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  }
+}
