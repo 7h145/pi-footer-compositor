@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Compose extension status segments into Pi's built-in footer.",
   "type": "module",
-  "license": "CC-BY-4.0",
+  "license": "MIT",
   "keywords": ["pi-package", "pi", "footer", "status", "tui"],
   "pi": {
     "extensions": ["./pi-footer-compositor.ts"]
