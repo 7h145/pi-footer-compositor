@@ -69,9 +69,6 @@ Producer extensions, such as
 [`pi-codex-usage`](https://github.com/7h145/pi-codex-usage), are installed
 separately. The compositor alone causes no visible change.
 
-If you already use the compositor through `pi-assorted`, disable that copy
-with `pi config` before installing the standalone package.
-
 To try a local checkout without installing, run from its root:
 
 ```bash
@@ -80,3 +77,19 @@ pi --no-extensions -e .
 
 This loads only the checkout's extension, avoiding a second installed copy
 of the footer patch.
+
+### Migrating from pi-assorted
+
+If you have the legacy [`pi-assorted`](https://github.com/7h145/pi-assorted)
+collection installed, turn off its pi-footer-compositor extension before installing this
+standalone version. Otherwise Pi will try to load the same extension twice.
+
+Run `pi config` in a terminal. Under the `pi-assorted` package's Extensions
+entries, select `pi-footer-compositor/pi-footer-compositor.ts` and press Space to uncheck it
+(`[ ]`). Changes are saved immediately; press Esc to close.
+
+For a project-local collection installation, run `pi config -l` from that
+project and press Space until the entry shows `[-]` (project unload).
+
+See Pi's [resource settings reference](https://pi.dev/docs/latest/settings#resources)
+for configuration details.
