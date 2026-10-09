@@ -1,0 +1,5 @@
+node_modules/
+*.log
+tmp/
+.agents/run/
+.agents/data/okf-engram/jobs/

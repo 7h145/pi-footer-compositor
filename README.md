@@ -55,19 +55,28 @@ run the old standalone `footer-status.ts` patch alongside this compositor.
 
 ## Installation
 
-The complete `pi-assorted` package includes the compositor and its producer
-extensions:
+Install this extension from GitHub:
 
 ```bash
-pi install git:github.com/7h145/pi-assorted
+pi install git:github.com/7h145/pi-footer-compositor
 ```
 
-To load this extension directly from the repository root:
+This is a personal/global install. Add `-l` for a project-local install.
+Run `/reload` after installing or updating while Pi is running.
+
+Producer extensions, such as
+[`pi-footer-workspace`](https://github.com/7h145/pi-footer-workspace) and
+[`pi-codex-usage`](https://github.com/7h145/pi-codex-usage), are installed
+separately. The compositor alone causes no visible change.
+
+If you already use the compositor through `pi-assorted`, disable that copy
+with `pi config` before installing the standalone package.
+
+To try a local checkout without installing, run from its root:
 
 ```bash
-pi -e ./extensions/pi-footer-compositor/pi-footer-compositor.ts
+pi --no-extensions -e .
 ```
 
-If `pi-assorted` is already installed, disable its installed compositor with
-`pi config`, or use `--no-extensions` for an isolated run, to avoid loading two
-prototype patches.
+This loads only the checkout's extension, avoiding a second installed copy
+of the footer patch.
