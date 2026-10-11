@@ -17,14 +17,15 @@
  */
 
 import { FooterComponent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const STATUS_KEY_PATTERN = /^footer-compositor:(left|right):(-?\d+):(.+)$/;
 const PATCH_KEY = "__piFooterCompositorRenderPatch";
 const MIN_PADDING = 2;
 const MIN_LEFT_WIDTH = 12;
 
-type FooterRender = (width: number) => string[];
+type FooterRender = (this: FooterComponent, width: number) => string[];
+type DimText = (text: string) => string;
 type Slot = "left" | "right";
 
 interface Segment {
@@ -38,12 +39,14 @@ interface FooterDataLike {
 	getExtensionStatuses(): ReadonlyMap<string, string>;
 }
 
+interface RenderPatch {
+	originalRender: FooterRender;
+	render: FooterRender;
+	owners: Set<DimText>;
+}
+
 type PatchedFooterPrototype = typeof FooterComponent.prototype & {
-	__piFooterCompositorRenderPatch?: {
-		originalRender: FooterRender;
-		owners: number;
-		getSeparator: () => string;
-	};
+	__piFooterCompositorRenderPatch?: RenderPatch;
 };
 
 function sanitizeStatusText(text: string): string {
@@ -75,8 +78,14 @@ function parseSegments(statuses: ReadonlyMap<string, string>): { segments: Segme
 	}
 
 	segments.sort((a, b) => a.order - b.order || a.key.localeCompare(b.key));
-	ordinary.sort(([a], [b]) => a.localeCompare(b));
 	return { segments, ordinary };
+}
+
+function formatStatusLine(statuses: Iterable<[string, string]>): string {
+	return [...statuses]
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([, text]) => sanitizeStatusText(text))
+		.join(" ");
 }
 
 function appendLeftSegments(line: string, segments: Segment[], width: number): string {
@@ -110,74 +119,69 @@ function composeFirstLine(line: string, leftSegments: Segment[], rightSegments: 
 	return truncateToWidth(left + padding + right, width, "");
 }
 
-function installPatch(getSeparator: () => string): void {
+function installPatch(dimText: DimText): () => void {
 	const proto = FooterComponent.prototype as PatchedFooterPrototype;
-	const existing = proto[PATCH_KEY];
-	if (existing) {
-		existing.owners++;
-		existing.getSeparator = getSeparator;
-		return;
+	let patch = proto[PATCH_KEY];
+	if (!patch) {
+		const originalRender = proto.render as FooterRender;
+		const owners = new Set<DimText>();
+		const render: FooterRender = function (width): string[] {
+			const lines = originalRender.call(this, width);
+			// A later patch can retain this renderer. Retired renderers must delegate
+			// without using a stale context or adopting a newer installation's state.
+			if (owners.size === 0 || lines.length !== 3) return lines;
+			const footerData = (this as unknown as { footerData?: Partial<FooterDataLike> }).footerData;
+			if (typeof footerData?.getExtensionStatuses !== "function") return lines;
+			const statuses = footerData.getExtensionStatuses();
+			if (!statuses || typeof statuses.size !== "number" || statuses.size === 0 ||
+				typeof statuses[Symbol.iterator] !== "function") return lines;
+
+			// Only replace the known two-line footer plus its final status row.
+			// Unknown layouts keep upstream output, including all producer statuses.
+			const expectedStatus = truncateToWidth(formatStatusLine(statuses), width, "...");
+			if (stripTerminalSequences(lines[2]!) !== stripTerminalSequences(expectedStatus)) return lines;
+			const { segments, ordinary } = parseSegments(statuses);
+			if (segments.length === 0) return lines;
+
+			const dim = [...owners].at(-1)!;
+			const result = lines.slice(0, 2);
+			result[0] = composeFirstLine(
+				result[0]!,
+				segments.filter((segment) => segment.slot === "left"),
+				segments.filter((segment) => segment.slot === "right"),
+				width,
+				dim("•"),
+			);
+			if (ordinary.length > 0) {
+				result.push(truncateToWidth(formatStatusLine(ordinary), width, dim("...")));
+			}
+			return result;
+		};
+		patch = { originalRender, render, owners };
+		proto[PATCH_KEY] = patch;
+		proto.render = render;
 	}
 
-	const originalRender = proto.render as FooterRender;
-	proto[PATCH_KEY] = { originalRender, owners: 1, getSeparator };
-
-	proto.render = function patchedRender(width: number): string[] {
-		const patch = (FooterComponent.prototype as PatchedFooterPrototype)[PATCH_KEY];
-		const lines = (patch?.originalRender ?? originalRender).call(this, width);
-		const footerData = (this as unknown as { footerData: FooterDataLike }).footerData;
-		const statuses = footerData?.getExtensionStatuses();
-		if (!statuses || statuses.size === 0 || lines.length === 0) return lines;
-
-		const { segments, ordinary } = parseSegments(statuses);
-		if (segments.length === 0) return lines;
-
-		// Pi appends all extension statuses as one final line. Remove that line,
-		// then restore only statuses that are not owned by this compositor.
-		const result = lines.slice(0, -1);
-		const leftSegments = segments.filter((segment) => segment.slot === "left");
-		const rightSegments = segments.filter((segment) => segment.slot === "right");
-		const separator = patch?.getSeparator() ?? "•";
-		result[0] = composeFirstLine(
-			result[0]!,
-			leftSegments,
-			rightSegments,
-			width,
-			separator,
-		);
-
-		if (ordinary.length > 0) {
-			const statusLine = ordinary.map(([, text]) => sanitizeStatusText(text)).filter(Boolean).join(" ");
-			if (statusLine) result.push(truncateToWidth(statusLine, width, "..."));
-		}
-		return result;
+	const installedPatch = patch;
+	installedPatch.owners.add(dimText);
+	return () => {
+		installedPatch.owners.delete(dimText);
+		if (installedPatch.owners.size > 0) return;
+		if (proto.render === installedPatch.render) proto.render = installedPatch.originalRender;
+		if (proto[PATCH_KEY] === installedPatch) delete proto[PATCH_KEY];
 	};
 }
 
-function uninstallPatch(): void {
-	const proto = FooterComponent.prototype as PatchedFooterPrototype;
-	const patch = proto[PATCH_KEY];
-	if (!patch) return;
-
-	patch.owners--;
-	if (patch.owners <= 0) {
-		proto.render = patch.originalRender;
-		delete proto[PATCH_KEY];
-	}
-}
-
 export default function (pi: ExtensionAPI) {
-	let installed = false;
+	let uninstall: (() => void) | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
-		if (ctx.mode !== "tui" || installed) return;
-		installPatch(() => ctx.ui.theme.fg("dim", "•"));
-		installed = true;
+		if (ctx.mode !== "tui" || uninstall) return;
+		uninstall = installPatch((text) => ctx.ui.theme.fg("dim", text));
 	});
 
 	pi.on("session_shutdown", () => {
-		if (!installed) return;
-		uninstallPatch();
-		installed = false;
+		uninstall?.();
+		uninstall = undefined;
 	});
 }

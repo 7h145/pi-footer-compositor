@@ -16,6 +16,7 @@ const PATCH_KEY = "__piFooterCompositorRenderPatch";
 const LEFT = "footer-compositor:left:10:workspace-read-only";
 const GIT = "footer-compositor:right:10:workspace-git";
 const USAGE = "footer-compositor:right:20:codex-usage";
+const runtimes: Array<{ stop(): void }> = [];
 
 function owner(mode: ExtensionContext["mode"] = "tui") {
 	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
@@ -35,12 +36,14 @@ function owner(mode: ExtensionContext["mode"] = "tui") {
 			return () => { handlers.delete(event); };
 		},
 	} as unknown as ExtensionAPI);
-	return {
+	const runtime = {
 		start: () => handlers.get("session_start")!({}, ctx),
 		stop: () => handlers.get("session_shutdown")!({}, ctx),
 		invalidate: () => { active = false; },
 		setColor: (value: string) => { color = value; },
 	};
+	runtimes.push(runtime);
+	return runtime;
 }
 
 // Exercise Pi's actual footer without an agent, credentials, Git watchers or TUI.
@@ -86,8 +89,13 @@ function plain(lines: string[]): string[] {
 }
 
 afterEach(() => {
-	proto.render = originalRender;
-	delete (proto as unknown as Record<string, unknown>)[PATCH_KEY];
+	try {
+		for (const runtime of runtimes.splice(0)) runtime.stop();
+		assert.equal((proto as unknown as Record<string, unknown>)[PATCH_KEY], undefined);
+	} finally {
+		proto.render = originalRender;
+		delete (proto as unknown as Record<string, unknown>)[PATCH_KEY];
+	}
 });
 
 test("leave the footer unchanged without compositor statuses", () => {
@@ -180,4 +188,136 @@ test("use the current theme for right-side separators", () => {
 	assert.ok(component.render(80)[0].includes("\x1b[36m•\x1b[39m"));
 	runtime.setColor("35");
 	assert.ok(component.render(80)[0].includes("\x1b[35m•\x1b[39m"));
+});
+
+test("fall back without removing rows when the footer layout changes", () => {
+	for (const lines of [[], ["path"], ["path", "stats"], ["path", "stats", "extra", "C W2%"]]) {
+		proto.render = () => [...lines];
+		const component = footer(new Map([[USAGE, "C W2%"]]));
+		const runtime = owner();
+		runtime.start();
+		assert.deepEqual(component.render(80), lines);
+		runtime.stop();
+	}
+});
+
+test("fall back when the last row is not the expected status row", () => {
+	const lines = ["path", "stats", "other footer content"];
+	proto.render = () => [...lines];
+	const component = footer(new Map([[USAGE, "C W2%"]]));
+	owner().start();
+	assert.deepEqual(component.render(80), lines);
+});
+
+test("accept status-row styling differences without losing the upstream stats", () => {
+	proto.render = () => ["path", "stats", "\x1b[31mC W2%\x1b[39m"];
+	const component = footer(new Map([[USAGE, "C W2%"]]));
+	owner().start();
+	const rendered = plain(component.render(80));
+	assert.equal(rendered.length, 2);
+	assert.ok(rendered[0].endsWith("C W2%"));
+	assert.equal(rendered[1], "stats");
+});
+
+test("fall back when the private status accessor or its return type changes", () => {
+	const lines = ["path", "stats", "C W2%"];
+	proto.render = () => [...lines];
+	for (const data of [undefined, {}, { getExtensionStatuses: 42 }, { getExtensionStatuses: () => [] }]) {
+		const component = footer(new Map([[USAGE, "C W2%"]]));
+		Object.defineProperty(component, "footerData", { value: data });
+		const runtime = owner();
+		runtime.start();
+		assert.deepEqual(component.render(80), lines);
+		runtime.stop();
+	}
+});
+
+test("preserve ordinary status spacing and use a themed truncation marker", () => {
+	const ordinary = new Map([["a", ""], ["z", "long ordinary status ".repeat(10)]]);
+	const expected = plain(footer(ordinary).render(40))[2];
+	const component = footer(new Map([...ordinary, [USAGE, "C W2%"]]));
+	owner().start();
+	const rendered = component.render(40);
+	assert.equal(plain(rendered)[2], expected);
+	assert.ok(rendered[2].includes("\x1b[36m...\x1b[39m"));
+});
+
+test("separate left segments with spaces and sort them numerically", () => {
+	const component = footer(new Map([
+		["footer-compositor:left:20:second", "LEFT-B"],
+		["footer-compositor:left:10:first", "LEFT-A"],
+	]));
+	owner().start();
+	assert.ok(plain(component.render(100))[0].endsWith("LEFT-A LEFT-B"));
+});
+
+test("keep the patch until its last owner stops", () => {
+	const first = owner();
+	const second = owner();
+	first.start();
+	second.start();
+	const patched = proto.render;
+	first.stop();
+	first.invalidate();
+	assert.equal(proto.render, patched);
+	assert.ok(plain(footer(new Map([[USAGE, "C W2%"]])).render(80))[0].endsWith("C W2%"));
+	second.stop();
+	assert.equal(proto.render, originalRender);
+});
+
+test("use a remaining owner's theme after the newest owner stops", () => {
+	const first = owner();
+	const second = owner();
+	second.setColor("35");
+	first.start();
+	second.start();
+	const component = footer(new Map([[GIT, "clean"], [USAGE, "C W2%"]]));
+	assert.ok(component.render(80)[0].includes("\x1b[35m•\x1b[39m"));
+	second.stop();
+	second.invalidate();
+	assert.ok(component.render(80)[0].includes("\x1b[36m•\x1b[39m"));
+	first.stop();
+	assert.equal(proto.render, originalRender);
+});
+
+test("make a retained renderer inert after its owner stops", () => {
+	const component = footer(new Map([[GIT, "clean"], [USAGE, "C W2%"]]));
+	const before = component.render(80);
+	const runtime = owner();
+	runtime.start();
+	const retained = proto.render;
+	runtime.stop();
+	runtime.invalidate();
+	assert.deepEqual(retained.call(component, 80), before);
+});
+
+test("preserve a later patch and avoid stale callbacks or recursion after reinstall", () => {
+	const component = footer(new Map([[GIT, "clean"], [USAGE, "C W2%"]]));
+	const before = component.render(80);
+	const first = owner();
+	first.start();
+	const wrapped = proto.render;
+	const foreign = function (this: FooterComponent, width: number) { return wrapped.call(this, width); };
+	proto.render = foreign;
+	first.stop();
+	first.invalidate();
+	assert.equal(proto.render, foreign);
+	assert.deepEqual(component.render(80), before);
+
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const runtime = owner();
+		runtime.start();
+		assert.match(plain(component.render(80))[0], /clean • C W2%$/);
+		runtime.stop();
+		runtime.invalidate();
+		assert.equal(proto.render, foreign);
+		assert.deepEqual(component.render(80), before);
+	}
+});
+
+test("do not suppress upstream rendering errors", () => {
+	proto.render = () => { throw new Error("upstream render failed"); };
+	const component = footer(new Map([[USAGE, "C W2%"]]));
+	owner().start();
+	assert.throws(() => component.render(80), /upstream render failed/);
 });
