@@ -165,3 +165,15 @@ npm run check
 `check` runs TypeScript checking and Node's built-in test runner. The tests cover
 layout, ordinary statuses, unknown footer shapes, theme changes and patch cleanup
 without starting an agent or contacting a provider.
+
+## Last confirmed working
+
+| Date | Code revision | Pi | Node.js | Platform |
+|---|---|---|---|---|
+| 2026-10-11 | `9eeed0c` | `1.1.0` | `26.10.0` | Linux x64 |
+
+**Checked:** isolated live TUI (regular/fullscreen) with synthetic producers:
+status placement, resizing and reload/shutdown. Type checking and 19 automated
+tests also pass.
+
+One known-working configuration, not a supported-version range.
