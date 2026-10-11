@@ -13,7 +13,7 @@
  * License: MIT
  * Version: 0.1
  * Date: 2026-07-16
- * Last verified with Pi: 0.80.6
+ * Last verified with Pi: 1.0.2 and 1.1.0
  */
 
 import { FooterComponent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";

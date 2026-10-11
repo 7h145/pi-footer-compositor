@@ -26,16 +26,37 @@ ctx.ui.setStatus("footer-compositor:right:20:codex-usage", "C W2%");
 ctx.ui.setStatus("footer-compositor:left:10:read-only", "(ro)");
 ```
 
-Segments are displayed in ascending numeric order and separated with the same
-dim `•` used by Pi's built-in footer. On narrow terminals, lower-order right
-segments are removed first. Statuses with ordinary keys remain on Pi's normal
-extension-status line. Loading the compositor alone causes no visible change;
-at least one producer must publish a compositor status key.
+Within each slot, segments appear in ascending numeric order; equal orders are
+sorted by the full status key. Left segments follow the path/session text,
+separated by spaces. Right segments are right-aligned and separated by the dim
+`•` used by Pi's built-in footer. Use a stable, unique `<id>` for each status.
 
-Producers must clear their keys during `session_shutdown`:
+On narrow terminals, lower-order right segments are removed first. The
+path/session text is shortened to leave room for left markers and the surviving
+right segments. Left markers are truncated if they exceed their available space.
+Status text is kept on one line, and layout accounts for ANSI styles and Unicode
+character widths.
+
+Statuses with ordinary keys remain on Pi's normal extension-status line. Loading
+the compositor alone causes no visible change; at least one producer must publish
+a compositor status key.
+
+Publish from an active TUI context and clear every owned key during
+`session_shutdown`, whether or not the compositor is installed:
 
 ```ts
-ctx.ui.setStatus("footer-compositor:right:20:codex-usage", undefined);
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+const STATUS_KEY = "footer-compositor:right:20:codex-usage";
+
+export default function (pi: ExtensionAPI) {
+  pi.on("session_start", (_event, ctx) => {
+    if (ctx.mode === "tui") ctx.ui.setStatus(STATUS_KEY, "C W2%");
+  });
+  pi.on("session_shutdown", (_event, ctx) => {
+    ctx.ui.setStatus(STATUS_KEY, undefined);
+  });
+}
 ```
 
 ## Dependencies and compatibility
@@ -43,15 +64,25 @@ ctx.ui.setStatus("footer-compositor:right:20:codex-usage", undefined);
 This extension has no dependency on another Pi extension. It currently patches
 `FooterComponent.prototype.render()` because Pi does not provide composable
 first-line footer slots. That is an internal integration point and may require
-updates when Pi changes its footer implementation. Last verified with Pi 0.80.6.
+updates when Pi changes its footer implementation.
+
+If the footer layout or status accessor is not recognized, the compositor leaves
+Pi's rendered output unchanged rather than removing an unknown row. Producer
+values retain Pi's normal status placement. Changes to internal exports can still
+require an extension update.
+
+Automated checks and isolated regular/fullscreen TUI checks cover Pi 1.0.2 and
+1.1.0. Older Pi versions have not been retested.
 
 Pi has npm runtime dependencies for packages, but no manifest mechanism for
 expressing extension-to-extension activation dependencies. Producer extensions
 therefore use the public `setStatus()` API and degrade gracefully: without this
 compositor, Pi simply shows their values on its regular extension-status line.
 
-Only one extension should patch `FooterComponent.prototype.render()`. Do not
-run the old standalone `footer-status.ts` patch alongside this compositor.
+Only one extension should patch `FooterComponent.prototype.render()`. Cleanup
+does not overwrite a later render patch, but competing footer patches are not
+supported. Do not run the old standalone `footer-status.ts` patch alongside this
+compositor.
 
 ## Installation
 
@@ -81,15 +112,30 @@ of the footer patch.
 ### Migrating from pi-assorted
 
 If you have the legacy [`pi-assorted`](https://github.com/7h145/pi-assorted)
-collection installed, turn off its pi-footer-compositor extension before installing this
-standalone version. Otherwise Pi will try to load the same extension twice.
+collection installed, turn off its pi-footer-compositor extension before
+installing this standalone version. Otherwise Pi will try to load the same
+extension twice.
 
 Run `pi config` in a terminal. Under the `pi-assorted` package's Extensions
-entries, select `pi-footer-compositor/pi-footer-compositor.ts` and press Space to uncheck it
-(`[ ]`). Changes are saved immediately; press Esc to close.
+entries, select `pi-footer-compositor/pi-footer-compositor.ts` and press Space to
+uncheck it (`[ ]`). Changes are saved immediately; press Esc to close.
 
 For a project-local collection installation, run `pi config -l` from that
 project and press Space until the entry shows `[-]` (project unload).
 
 See Pi's [resource settings reference](https://pi.dev/docs/latest/settings#resources)
 for configuration details.
+
+## Development
+
+Use Node.js 22.19 or newer. Development dependencies are pinned to Pi 1.1.0; Pi
+provides the runtime packages when loading the extension.
+
+```bash
+npm ci
+npm run check
+```
+
+`check` runs TypeScript checking and Node's built-in test runner. The tests cover
+layout, ordinary statuses, unknown footer shapes, theme changes and patch cleanup
+without starting an agent or contacting a provider.
