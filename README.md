@@ -11,25 +11,36 @@ line.
 
 ## Producer protocol
 
-Producer extensions use Pi's normal `ctx.ui.setStatus()` API with a structured
-status key:
+A producer is any Pi extension that publishes footer text. Use Pi's normal
+`ctx.ui.setStatus()` API; do not import from this package or add it as an npm
+dependency. You do not need to check whether the compositor is loaded or arrange
+a particular extension load order. Users enable the compositor separately;
+without it, Pi shows your values on its regular extension-status line.
+
+Use a structured status key:
 
 ```text
 footer-compositor:left:<order>:<id>
 footer-compositor:right:<order>:<id>
 ```
 
+- `<order>` is a signed decimal integer, such as `10`, `20` or `-10`. Within each
+  slot, segments appear in ascending numeric order; equal orders are sorted by
+  the full status key. On the right, larger orders also survive longer when space
+  is limited.
+- `<id>` is a non-empty, stable name unique to your producer's status. Include
+  your extension's name to avoid overwriting another producer's value. Replace
+  `my-extension` in the examples with your own extension's name.
+
 For example:
 
 ```ts
-ctx.ui.setStatus("footer-compositor:right:20:codex-usage", "C W2%");
-ctx.ui.setStatus("footer-compositor:left:10:read-only", "(ro)");
+ctx.ui.setStatus("footer-compositor:right:20:my-extension-state", "Ready");
+ctx.ui.setStatus("footer-compositor:left:10:my-extension-read-only", "(ro)");
 ```
 
-Within each slot, segments appear in ascending numeric order; equal orders are
-sorted by the full status key. Left segments follow the path/session text,
-separated by spaces. Right segments are right-aligned and separated by the dim
-`•` used by Pi's built-in footer. Use a stable, unique `<id>` for each status.
+Left segments follow the path/session text, separated by spaces. Right segments
+are right-aligned and separated by the dim `•` used by Pi's built-in footer.
 
 On narrow terminals, lower-order right segments are removed first. The
 path/session text is shortened to leave room for left markers and the surviving
@@ -41,23 +52,38 @@ Statuses with ordinary keys remain on Pi's normal extension-status line. Loading
 the compositor alone causes no visible change; at least one producer must publish
 a compositor status key.
 
+Publish again under the same key to replace its value. Pass `undefined` to remove
+it immediately, for example when a condition no longer applies. Use the same key
+whether or not the compositor is installed; do not also publish a duplicate under
+an ordinary status key.
+
+```ts
+ctx.ui.setStatus("footer-compositor:right:20:my-extension-state", "Working");
+ctx.ui.setStatus("footer-compositor:right:20:my-extension-state", undefined);
+```
+
 Publish from an active TUI context and clear every owned key during
 `session_shutdown`, whether or not the compositor is installed:
 
 ```ts
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const STATUS_KEY = "footer-compositor:right:20:codex-usage";
+const STATUS_KEY = "footer-compositor:right:20:my-extension-state";
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
-    if (ctx.mode === "tui") ctx.ui.setStatus(STATUS_KEY, "C W2%");
+    if (ctx.mode === "tui") ctx.ui.setStatus(STATUS_KEY, "Ready");
   });
   pi.on("session_shutdown", (_event, ctx) => {
     ctx.ui.setStatus(STATUS_KEY, undefined);
   });
 }
 ```
+
+If your producer uses timers or asynchronous requests, stop its timers and cancel
+pending requests where possible during `session_shutdown`. Ensure late results
+cannot publish after shutdown. Clear keys using the context passed to the
+shutdown handler; do not reuse a context from an earlier session.
 
 ## Dependencies and compatibility
 
