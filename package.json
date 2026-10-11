@@ -8,6 +8,17 @@
   "pi": {
     "extensions": ["./pi-footer-compositor.ts"]
   },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
+    "@types/node": "24.10.1",
+    "typescript": "7.0.2"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.80.4",
     "@earendil-works/pi-tui": "*"

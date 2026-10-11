@@ -90,22 +90,22 @@ function appendLeftSegments(line: string, segments: Segment[], width: number): s
 	return truncateToWidth(left + suffix, width, "");
 }
 
-function rightAlignSegments(line: string, segments: Segment[], width: number, separator: string): string {
-	if (segments.length === 0 || width <= 0) return truncateToWidth(line, width, "");
+function composeFirstLine(line: string, leftSegments: Segment[], rightSegments: Segment[], width: number, separator: string): string {
+	if (width <= 0) return truncateToWidth(line, width, "");
 
-	// Lower-order segments are less important. Drop them first until the right
-	// side leaves a useful amount of room for Pi's path/session text.
-	let visibleSegments = [...segments];
+	// Choose the right side before laying out the path and left markers, so
+	// truncating a long path does not also truncate its appended markers.
+	const visibleSegments = [...rightSegments];
 	let right = visibleSegments.map((segment) => segment.text).join(` ${separator} `);
 	while (visibleSegments.length > 0 && visibleWidth(right) + MIN_PADDING + MIN_LEFT_WIDTH > width) {
 		visibleSegments.shift();
 		right = visibleSegments.map((segment) => segment.text).join(` ${separator} `);
 	}
-	if (!right) return truncateToWidth(line, width, "");
+	if (!right) return appendLeftSegments(line, leftSegments, width);
 
 	const rightWidth = visibleWidth(right);
 	const availableLeft = width - rightWidth - MIN_PADDING;
-	const left = truncateToWidth(line, availableLeft, "...");
+	const left = appendLeftSegments(line, leftSegments, availableLeft);
 	const padding = " ".repeat(Math.max(MIN_PADDING, width - visibleWidth(left) - rightWidth));
 	return truncateToWidth(left + padding + right, width, "");
 }
@@ -138,8 +138,9 @@ function installPatch(getSeparator: () => string): void {
 		const leftSegments = segments.filter((segment) => segment.slot === "left");
 		const rightSegments = segments.filter((segment) => segment.slot === "right");
 		const separator = patch?.getSeparator() ?? "•";
-		result[0] = rightAlignSegments(
-			appendLeftSegments(result[0]!, leftSegments, width),
+		result[0] = composeFirstLine(
+			result[0]!,
+			leftSegments,
 			rightSegments,
 			width,
 			separator,
