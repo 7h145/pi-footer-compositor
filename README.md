@@ -122,7 +122,7 @@ This is a personal/global install. Add `-l` for a project-local install.
 Run `/reload` after installing or updating while Pi is running.
 
 Producer extensions, such as
-[`pi-footer-workspace`](https://github.com/7h145/pi-footer-workspace) and
+[`pi-git-monitor`](https://github.com/7h145/pi-git-monitor) and
 [`pi-codex-usage`](https://github.com/7h145/pi-codex-usage), are installed
 separately. The compositor alone causes no visible change.
 
