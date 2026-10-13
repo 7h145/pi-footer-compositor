@@ -85,6 +85,192 @@ pending requests where possible during `session_shutdown`. Ensure late results
 cannot publish after shutdown. Clear keys using the context passed to the
 shutdown handler; do not reuse a context from an earlier session.
 
+## Optional width-aware left producers
+
+Use this capability only when a left segment needs to choose its format from the
+space actually available—for example, switching from per-item characters to
+counts. Static producers do not need it or any changes to their existing code.
+Dynamic right segments are not supported.
+
+Discover the capability through Pi's public `pi.events` bus. Do not import this
+package or depend on its installation path. The shared structural types are:
+
+```ts
+import type { Theme } from "@earendil-works/pi-coding-agent";
+
+type DynamicLeftRenderer = (input: {
+  maxWidth: number;
+  theme: Theme;
+}) => string | undefined;
+
+interface DynamicLeftCapabilityV1 {
+  version: 1;
+  instanceId: string;
+  register(input: {
+    key: string;
+    render: DynamicLeftRenderer;
+  }): () => void;
+}
+```
+
+| Channel | Payload | Sender |
+|---|---|---|
+| `footer-compositor:dynamic-left:discover` | `{ version: 1, accept: (capability: DynamicLeftCapabilityV1) => void }` | Producer |
+| `footer-compositor:dynamic-left:available` | `DynamicLeftCapabilityV1` | Compositor |
+| `footer-compositor:dynamic-left:unavailable` | `{ version: 1, instanceId: string }` | Compositor |
+
+Subscribe during `session_start`, then emit discover. An installed compositor
+responds synchronously; its available announcement handles the opposite start
+order. Ignore unsupported versions and malformed payloads. Repeated announcements
+of the same instance must not create duplicate registrations. A different
+instance replaces the producer's previous registration; an unavailable notice
+only applies to its matching instance. Capability identities are session-scoped,
+not package versions. Unsubscribe and release them during `session_shutdown`.
+
+### Registration and fallback
+
+Always publish a nonempty static fallback under the **same left status key**.
+Registration overrides that value's rendering; it does not add another status.
+Clearing the status with `undefined` hides the segment even while registered.
+Republish fallback after registration, cached-data updates and unregistration:
+Pi's `setStatus()` requests a render even when its text has not changed. Registry
+changes otherwise take effect on the next render.
+
+`register()` accepts a valid left key with a finite numeric order and a callable
+renderer. Invalid arguments throw `TypeError`; a retired capability throws
+`Error`. Keep static fallback if registration fails. Re-registering a key replaces
+its renderer. Disposers are idempotent and cannot remove a newer registration.
+
+Without a compositor, or with an older compositor lacking this capability, the
+fallback still follows the static protocol. The capability is advertised only in
+TUI mode. If the upstream footer shape is unrecognized, the compositor does not
+invoke dynamic renderers and leaves Pi's output, including fallbacks, unchanged.
+Capability discovery therefore does not guarantee first-line placement on an
+unsupported Pi footer or a custom replacement footer.
+
+### Renderer and allocation rules
+
+- `maxWidth` is a nonnegative integer number of **visible terminal columns**,
+  not the terminal width. Use Pi's `visibleWidth()` for measurement.
+- Render from cached data only. Do not perform filesystem, tmux, network or model
+  calls, mutate state or registrations, publish statuses, or emit events here.
+- Return a synchronous, single-line string fitting the budget, or empty/undefined.
+  At a zero budget, return empty/undefined. The supplied theme is current for
+  this render; do not reuse strings styled with an earlier theme.
+- ANSI SGR color/style sequences (`ESC [ … m`) are allowed and isolated from
+  neighboring text. Other terminal controls, including tabs, newlines, cursor
+  commands and OSC hyperlinks, are rejected for dynamic output. This restriction
+  does not change the existing static protocol.
+- Throwing, non-string, async, unsafe or oversized output becomes a neutral `…`
+  when one column is available, otherwise nothing. Diagnostics are deferred,
+  bounded and deduplicated per registration and failure kind. Valid output is
+  never truncated after formatting.
+
+The compositor chooses right statuses using the existing priority rules, then
+reserves space for static left values, separators and up to 12 columns of
+path/session text. Dynamic producers receive the remaining pool in ascending
+numeric order, with the full key breaking ties. Each receives what earlier
+producers left unused; an earlier producer may consume the whole pool. Fallback
+length does not affect its budget. Unused space expands the path/session text.
+Separator reservations for empty outputs are not reassigned to other dynamic
+producers within that render. Impossible static layouts retain static clipping.
+
+### Complete producer example
+
+This synthetic producer switches between a strip and counts. Replace the demo
+command with your own observation code; update cached strings and publish outside
+the renderer. Include the structural declarations above in your extension.
+
+```ts
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
+
+const KEY = "footer-compositor:left:20:my-monitor";
+const PREFIX = "footer-compositor:dynamic-left:";
+
+export default function (pi: ExtensionAPI) {
+  let active = false;
+  let strip = "WWII";
+  let counts = "W2 I2";
+  let capability: DynamicLeftCapabilityV1 | undefined;
+  let unregister: (() => void) | undefined;
+  let publish: (() => void) | undefined;
+  let subscriptions: Array<() => void> = [];
+
+  const render: DynamicLeftRenderer = ({ maxWidth, theme }) => {
+    const text = visibleWidth(strip) <= maxWidth ? strip
+      : visibleWidth(counts) <= maxWidth ? counts
+      : maxWidth > 0 ? "…" : "";
+    return text ? theme.fg("accent", text) : undefined;
+  };
+
+  function accept(payload: unknown) {
+    if (!active || !payload || typeof payload !== "object") return;
+    const next = payload as DynamicLeftCapabilityV1;
+    if (next.version !== 1 || typeof next.instanceId !== "string" ||
+        !next.instanceId || typeof next.register !== "function" ||
+        next.instanceId === capability?.instanceId) return;
+    try {
+      const remove = next.register({ key: KEY, render });
+      unregister?.();
+      unregister = remove;
+      capability = next;
+    } catch {
+      // Retain any working registration, otherwise use static fallback.
+    }
+    publish?.();
+  }
+
+  function discover() {
+    if (active) pi.events.emit(PREFIX + "discover", { version: 1, accept });
+  }
+
+  pi.on("session_start", (_event, ctx) => {
+    if (ctx.mode !== "tui" || active) return;
+    active = true;
+    publish = () => ctx.ui.setStatus(KEY, counts);
+    subscriptions = [
+      pi.events.on(PREFIX + "available", accept),
+      pi.events.on(PREFIX + "unavailable", (payload) => {
+        if (!active || !payload || typeof payload !== "object") return;
+        const notice = payload as { version?: unknown; instanceId?: unknown };
+        if (notice.version !== 1 || !capability ||
+            notice.instanceId !== capability.instanceId) return;
+        unregister?.();
+        unregister = undefined;
+        capability = undefined;
+        publish?.();
+        discover();
+      }),
+    ];
+    publish();
+    discover();
+  });
+
+  pi.registerCommand("monitor-demo", {
+    description: "Toggle cached synthetic monitor data",
+    handler: async () => {
+      const large = strip.length === 4;
+      strip = large ? "W".repeat(30) : "WWII";
+      counts = large ? "W30 I0" : "W2 I2";
+      publish?.();
+    },
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (!active) return;
+    active = false;
+    for (const unsubscribe of subscriptions) unsubscribe();
+    subscriptions = [];
+    unregister?.();
+    unregister = undefined;
+    capability = undefined;
+    publish = undefined;
+    ctx.ui.setStatus(KEY, undefined);
+  });
+}
+```
+
 ## Dependencies and compatibility
 
 This extension has no dependency on another Pi extension. It currently patches
@@ -97,8 +283,9 @@ Pi's rendered output unchanged rather than removing an unknown row. Producer
 values retain Pi's normal status placement. Changes to internal exports can still
 require an extension update.
 
-Automated checks and isolated regular/fullscreen TUI checks cover Pi 1.0.2 and
-1.1.0. Older Pi versions have not been retested.
+Automated checks cover Pi 1.0.2 and 1.1.0. The width-aware capability has also
+been checked in isolated regular/fullscreen TUI sessions on Pi 1.1.0. Older Pi
+versions have not been retested.
 
 Pi has npm runtime dependencies for packages, but no manifest mechanism for
 expressing extension-to-extension activation dependencies. Producer extensions
@@ -163,8 +350,9 @@ npm run check
 ```
 
 `check` runs TypeScript checking and Node's built-in test runner. The tests cover
-layout, ordinary statuses, unknown footer shapes, theme changes and patch cleanup
-without starting an agent or contacting a provider.
+static and dynamic layout, discovery, invalid renderer output, ordinary statuses,
+unknown footer shapes, theme changes and patch cleanup without starting an agent
+or contacting a provider.
 
 ## Last confirmed working
 
