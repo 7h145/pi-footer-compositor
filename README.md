@@ -383,10 +383,10 @@ or contacting a provider.
 
 | Date | Code revision | Pi | Node.js | Platform |
 |---|---|---|---|---|
-| 2026-10-11 | `9eeed0c` | `1.1.0` | `26.10.0` | Linux x64 |
+| 2026-10-14 | `674b139` | `1.1.0` | `26.10.0` | Linux x64 |
 
-**Checked:** isolated live TUI (regular/fullscreen) with synthetic producers:
-status placement, resizing and reload/shutdown. Type checking and 19 automated
-tests also pass.
+**Checked:** isolated live TUI (regular/fullscreen) with synthetic left/right
+producers: allocation and priority, resizing, theme changes, and reload/shutdown.
+Type checking and 52 automated tests pass on Pi SDKs 1.0.2 and 1.1.0.
 
 One known-working configuration, not a supported-version range.
