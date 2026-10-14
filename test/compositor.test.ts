@@ -19,10 +19,11 @@ const LEFT = "footer-compositor:left:10:workspace-read-only";
 const GIT = "footer-compositor:right:10:workspace-git";
 const USAGE = "footer-compositor:right:20:codex-usage";
 const runtimes: Array<{ stop(): void }> = [];
-const DISCOVER = "footer-compositor:dynamic-left:discover";
-const AVAILABLE = "footer-compositor:dynamic-left:available";
-const UNAVAILABLE = "footer-compositor:dynamic-left:unavailable";
+const DISCOVER = "footer-compositor:dynamic:discover";
+const AVAILABLE = "footer-compositor:dynamic:available";
+const UNAVAILABLE = "footer-compositor:dynamic:unavailable";
 const DYNAMIC = "footer-compositor:left:20:synthetic-monitor";
+const DYNAMIC_RIGHT = "footer-compositor:right:30:synthetic-monitor";
 type Renderer = (input: { maxWidth: number; theme: Theme }) => string | undefined;
 interface Capability {
 	version: 1;
@@ -463,7 +464,7 @@ test("validate registrations and make replaced disposers harmless", () => {
 	runtime.start();
 	const capability = discover(runtime.bus);
 	for (const input of [null, {}, { key: DYNAMIC }, { key: DYNAMIC, render: "bad" },
-		...["ordinary", GIT, "footer-compositor:left:2:", "footer-compositor:left:x:id",
+		...["ordinary", "footer-compositor:middle:10:id", "footer-compositor:left:2:", "footer-compositor:right:x:id",
 			`footer-compositor:left:${"9".repeat(400)}:id`].map((key) => ({ key, render: () => "bad" }))]) {
 		assert.throws(() => capability.register(input as Parameters<Capability["register"]>[0]), TypeError);
 	}
@@ -814,4 +815,282 @@ test("a disposed dynamic key returns exactly to the legacy static layout", () =>
 	component.render(80);
 	remove();
 	for (let width = 0; width <= 140; width++) assert.deepEqual(component.render(width), baseline[width]);
+});
+
+test("one generic capability registers both sides and ignores the left-only prototype channels", () => {
+	const runtime = owner();
+	let oldAdvertisements = 0;
+	runtime.bus.on("footer-compositor:dynamic-left:available", () => { oldAdvertisements++; });
+	runtime.start();
+	let oldDiscoveryAccepted = false;
+	runtime.bus.emit("footer-compositor:dynamic-left:discover", { version: 1, accept: () => { oldDiscoveryAccepted = true; } });
+	assert.equal(oldDiscoveryAccepted, false);
+	assert.equal(oldAdvertisements, 0);
+	assert.equal(runtime.bus.count("footer-compositor:dynamic-left:discover"), 0);
+	const capability = discover(runtime.bus);
+	const leftKey = "footer-compositor:left:20:same-id";
+	const rightKey = "footer-compositor:right:20:same-id";
+	const left = capability.register({ key: leftKey, render: () => "LEFT" });
+	const oldRight = capability.register({ key: rightKey, render: () => "OLD-RIGHT" });
+	const right = capability.register({ key: rightKey, render: () => "RIGHT" });
+	oldRight(); oldRight();
+	const component = footer(new Map([[leftKey, "left-fallback"], [rightKey, "right-fallback"]]));
+	assert.match(plain(component.render(80))[0], /LEFT\s+RIGHT$/);
+	left(); left();
+	assert.match(plain(component.render(80))[0], /left-fallback\s+RIGHT$/);
+	right(); right();
+	assert.match(plain(component.render(80))[0], /left-fallback\s+right-fallback$/);
+});
+
+test("right-first budgets include higher-priority static right text and determine the left budget", () => {
+	const runtime = owner(); runtime.start();
+	const capability = discover(runtime.bus);
+	const rightKey = "footer-compositor:right:10:dynamic";
+	const calls: Array<[string, number]> = [];
+	capability.register({ key: rightKey, render: ({ maxWidth }) => { calls.push(["right", maxWidth]); return "123456789"; } });
+	capability.register({ key: DYNAMIC, render: ({ maxWidth }) => { calls.push(["left", maxWidth]); return "abcdefghi"; } });
+	const statuses = new Map([[rightKey, "right fallback"], [DYNAMIC, "left fallback"], [LEFT, "(ro)"], [USAGE, "0123456789"]]);
+	const component = footer(statuses);
+	const first = plain(component.render(80))[0];
+	assert.deepEqual(calls, [["right", 53], ["left", 38]]);
+	assert.match(first, /\(ro\) abcdefghi\s+123456789 • 0123456789$/);
+	assert.equal(visibleWidth(first), 80);
+	calls.length = 0;
+	statuses.set(rightKey, "much longer fallback ".repeat(100));
+	statuses.set(DYNAMIC, "another long fallback ".repeat(100));
+	assert.equal(plain(component.render(80))[0], first);
+	assert.deepEqual(calls, [["right", 53], ["left", 38]]);
+});
+
+test("right callbacks run in descending numeric and key priority but display in ascending order", () => {
+	const runtime = owner(); runtime.start();
+	const capability = discover(runtime.bus);
+	const statuses = new Map<string, string>();
+	const calls: Array<[string, number]> = [];
+	for (const [key, text] of [["footer-compositor:right:2:first", "FIRST"],
+		["footer-compositor:right:20:a", "AAA"], ["footer-compositor:right:20:z", "Z"]]) {
+		statuses.set(key, "fallback");
+		capability.register({ key, render: ({ maxWidth }) => { calls.push([text, maxWidth]); return text; } });
+	}
+	const first = plain(footer(statuses).render(80))[0];
+	assert.deepEqual(calls, [["Z", 66], ["AAA", 62], ["FIRST", 56]]);
+	assert.match(first, /FIRST • AAA • Z$/);
+});
+
+test("a high-priority right renderer can consume the pool and leave the left renderer zero columns", () => {
+	const runtime = owner(); runtime.start();
+	const capability = discover(runtime.bus);
+	const lower = "footer-compositor:right:10:lower";
+	let leftBudget = -1;
+	let lowerCalls = 0;
+	capability.register({ key: DYNAMIC_RIGHT, render: ({ maxWidth }) => "R".repeat(maxWidth) });
+	capability.register({ key: lower, render: () => { lowerCalls++; return "LOWER"; } });
+	capability.register({ key: DYNAMIC, render: ({ maxWidth }) => { leftBudget = maxWidth; return ""; } });
+	const statuses = new Map([[DYNAMIC_RIGHT, "fallback"], [lower, "fallback"], [DYNAMIC, "fallback"], [LEFT, "(ro)"], [USAGE, "USAGE"]]);
+	const first = plain(footer(statuses).render(80))[0];
+	assert.ok(first.endsWith("R".repeat(66)));
+	assert.ok(first.includes("(ro)"));
+	assert.ok(!first.includes("USAGE"));
+	assert.equal(leftBudget, 0);
+	assert.equal(lowerCalls, 0); // The intervening static value cannot fit, so lower priorities are dropped.
+	assert.equal(visibleWidth(first), 80);
+});
+
+test("empty right renderers consume no separators and release unused space to the left", () => {
+	const runtime = owner(); runtime.start();
+	const capability = discover(runtime.bus);
+	const secondRight = "footer-compositor:right:20:second";
+	const budgets: number[] = [];
+	let leftBudget = -1;
+	capability.register({ key: DYNAMIC_RIGHT, render: ({ maxWidth }) => { budgets.push(maxWidth); return ""; } });
+	capability.register({ key: secondRight, render: ({ maxWidth }) => { budgets.push(maxWidth); return undefined; } });
+	capability.register({ key: DYNAMIC, render: ({ maxWidth }) => { leftBudget = maxWidth; return "LEFT"; } });
+	const statuses = new Map([[DYNAMIC_RIGHT, "fallback"], [secondRight, "fallback"], [DYNAMIC, "fallback"], [GIT, "clean"]]);
+	const component = footer(statuses);
+	assert.match(plain(component.render(80))[0], /LEFT\s+clean$/);
+	assert.deepEqual(budgets, [66, 66]);
+	assert.equal(leftBudget, 60);
+	budgets.length = 0;
+	statuses.delete(GIT);
+	assert.match(plain(component.render(80))[0], /LEFT$/);
+	assert.deepEqual(budgets, [66, 66]);
+	assert.equal(leftBudget, 67); // All right text and its two-column padding are absent.
+});
+
+test("an indivisible static right value excludes lower priorities when it cannot fit", () => {
+	const runtime = owner(); runtime.start();
+	const capability = discover(runtime.bus);
+	const higher = "footer-compositor:right:40:large-static";
+	let calls = 0;
+	capability.register({ key: DYNAMIC_RIGHT, render: () => { calls++; return "DYN"; } });
+	const statuses = new Map([[higher, "X".repeat(100)], [DYNAMIC_RIGHT, "tiny"], [LEFT, "(ro)"]]);
+	const component = footer(statuses);
+	const first = plain(component.render(30))[0];
+	assert.equal(calls, 0);
+	assert.ok(!first.includes("tiny") && !first.includes("DYN") && !first.includes("XXX"));
+	statuses.set(higher, "HI");
+	assert.match(plain(component.render(30))[0], /DYN • HI$/);
+	assert.equal(calls, 1);
+});
+
+test("right renderers require nonempty fallback presence and never duplicate ordinary status text", () => {
+	const runtime = owner(); runtime.start();
+	let calls = 0;
+	discover(runtime.bus).register({ key: DYNAMIC_RIGHT, render: () => { calls++; return "RIGHT"; } });
+	const statuses = new Map([["ordinary", "ORDINARY"], [LEFT, "(ro)"]]);
+	const component = footer(statuses);
+	const before = component.render(80);
+	for (const text of ["", " \t\n "]) {
+		statuses.set(DYNAMIC_RIGHT, text);
+		assert.deepEqual(component.render(80), before);
+	}
+	assert.equal(calls, 0);
+	statuses.set(DYNAMIC_RIGHT, "FALLBACK");
+	const lines = plain(component.render(80));
+	assert.match(lines[0], /\(ro\)\s+RIGHT$/);
+	assert.equal(lines[2], "ORDINARY");
+	assert.ok(!lines.join("\n").includes("FALLBACK"));
+	assert.equal(calls, 1);
+	statuses.delete(DYNAMIC_RIGHT);
+	assert.deepEqual(component.render(80), before);
+	assert.equal(calls, 1);
+});
+
+test("right invalid and async output is contained without truncation or starving lower-priority text", async () => {
+	const runtime = owner(); runtime.start();
+	const capability = discover(runtime.bus);
+	const lower = "footer-compositor:right:10:lower";
+	let lowerBudget = -1;
+	capability.register({ key: lower, render: ({ maxWidth }) => { lowerBudget = maxWidth; return "LOWER"; } });
+	const component = footer(new Map([[DYNAMIC_RIGHT, "fallback"], [lower, "fallback"], [USAGE, "USAGE"], [LEFT, "(ro)"], ["ordinary", "ORDINARY"]]));
+	const messages: string[] = [];
+	const warn = console.warn;
+	console.warn = (message: string) => { messages.push(message); };
+	try {
+		for (const render of [() => "W12345".repeat(100), () => "\x1b[2J", () => "\n", () => null,
+			() => { throw new Error("private producer data"); }, () => Promise.reject(new Error("async"))]) {
+			const start = messages.length;
+			capability.register({ key: DYNAMIC_RIGHT, render: render as Renderer });
+			for (let frame = 0; frame < 3; frame++) {
+				const lines = plain(component.render(80));
+				assert.match(lines[0], /\(ro\)\s+LOWER • USAGE • …$/);
+				assert.equal(lines[2], "ORDINARY");
+				assert.equal(lowerBudget, 54); // 66 - omission 1 - two separators 6 - static usage 5
+			}
+			assert.equal(messages.length, start);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(messages.length, start + 1);
+			assert.ok(messages.at(-1)!.length < 300 && !messages.at(-1)!.includes("private producer data"));
+		}
+	} finally { console.warn = warn; }
+});
+
+test("both sides preserve complete ANSI and Unicode output over a width sweep with static clipping", () => {
+	const runtime = owner(); runtime.start();
+	const capability = discover(runtime.bus);
+	let expectedLeft = "";
+	let expectedRight = "";
+	let rightBudget = -1;
+	capability.register({ key: DYNAMIC, render: ({ maxWidth, theme }) => {
+		expectedLeft = maxWidth >= visibleWidth("左34 只") ? "左34 只" : maxWidth ? "L" : "";
+		return expectedLeft ? theme.fg("accent", expectedLeft) : undefined;
+	} });
+	capability.register({ key: DYNAMIC_RIGHT, render: ({ maxWidth, theme }) => {
+		rightBudget = maxWidth;
+		expectedRight = maxWidth >= visibleWidth("右56 e\u0301") ? "右56 e\u0301" : maxWidth ? "R" : "";
+		return expectedRight ? theme.fg("warning", expectedRight) : undefined;
+	} });
+	for (const marker of ["(ro)", "STATIC".repeat(40)]) {
+		const component = footer(new Map([[DYNAMIC, "fallback"], [DYNAMIC_RIGHT, "fallback"],
+			[LEFT, marker], [GIT, "clean"], [USAGE, "C W2%"], ["ordinary", "ordinary"]]), "/" + "long-path/".repeat(30));
+		for (let width = 0; width <= 180; width++) {
+			const lines = component.render(width);
+			for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}`);
+			assert.equal(rightBudget, Math.max(0, width - 14));
+			const first = plain(lines)[0];
+			if (expectedLeft) assert.ok(first.includes(expectedLeft), `complete left output at ${width}`);
+			if (expectedRight) assert.ok(first.includes(expectedRight), `complete right output at ${width}`);
+		}
+	}
+	const component = footer(new Map([[DYNAMIC_RIGHT, "fallback"]]));
+	assert.ok(component.render(80)[0].includes("\x1b[36m右56"));
+	runtime.setColor("35");
+	assert.ok(component.render(80)[0].includes("\x1b[35m右56"));
+});
+
+test("unknown footer shapes never invoke either side and retain upstream fallbacks", () => {
+	const lines = ["path", "stats", "unrecognized"];
+	proto.render = () => [...lines];
+	const runtime = owner(); runtime.start();
+	let calls = 0;
+	for (const key of [DYNAMIC, DYNAMIC_RIGHT]) {
+		discover(runtime.bus).register({ key, render: () => { calls++; return "dynamic"; } });
+	}
+	assert.deepEqual(footer(new Map([[DYNAMIC, "left fallback"], [DYNAMIC_RIGHT, "right fallback"]])).render(80), lines);
+	assert.equal(calls, 0);
+});
+
+test("a retired capability and retained wrapper cannot invoke or remove either side of a newer session", () => {
+	const statuses = new Map([[DYNAMIC, "LEFT-FALLBACK"], [DYNAMIC_RIGHT, "RIGHT-FALLBACK"]]);
+	const component = footer(statuses);
+	const before = component.render(80);
+	const first = owner(); first.start();
+	const old = discover(first.bus);
+	let oldCalls = 0;
+	const oldDisposers = [DYNAMIC, DYNAMIC_RIGHT].map((key) => old.register({ key, render: () => { oldCalls++; return "OLD"; } }));
+	const retained = proto.render;
+	component.render(80);
+	assert.equal(oldCalls, 2);
+	first.stop(); first.invalidate();
+	assert.deepEqual(retained.call(component, 80), before);
+	const second = owner(); second.start();
+	const fresh = discover(second.bus);
+	assert.notEqual(fresh.instanceId, old.instanceId);
+	for (const [key, text] of [[DYNAMIC, "NEW-LEFT"], [DYNAMIC_RIGHT, "NEW-RIGHT"]]) {
+		fresh.register({ key, render: () => text });
+		assert.throws(() => old.register({ key, render: () => "late" }), /retired/);
+	}
+	for (const remove of oldDisposers) { remove(); remove(); }
+	assert.deepEqual(retained.call(component, 80), before);
+	assert.match(plain(component.render(80))[0], /NEW-LEFT\s+NEW-RIGHT$/);
+	assert.equal(oldCalls, 2);
+});
+
+test("clearing or unregistering right support restores the exact legacy right-selection path", () => {
+	const statuses = new Map([[DYNAMIC_RIGHT, "static fallback"], [LEFT, "(ro)"], [GIT, "clean"], [USAGE, "C W2%"]]);
+	const component = footer(statuses, "/" + "long-path/".repeat(20));
+	const runtime = owner(); runtime.start();
+	const baseline = Array.from({ length: 141 }, (_, width) => component.render(width));
+	const capability = discover(runtime.bus);
+	const remove = capability.register({ key: DYNAMIC_RIGHT, render: ({ maxWidth }) => maxWidth ? "R" : "" });
+	component.render(80); remove();
+	for (let width = 0; width <= 140; width++) assert.deepEqual(component.render(width), baseline[width]);
+});
+
+test("rendering re-entered during discovery unsubscribe cannot use a retiring owner's context", () => {
+	const bus = eventBus();
+	const on = bus.on;
+	const component = footer(new Map([[DYNAMIC, "LEFT-FALLBACK"], [DYNAMIC_RIGHT, "RIGHT-FALLBACK"]]));
+	const before = component.render(80);
+	let retained: typeof proto.render;
+	let duringCleanup: string[] | undefined;
+	bus.on = (channel, handler) => {
+		const unsubscribe = on(channel, handler);
+		return () => {
+			if (channel === DISCOVER) duringCleanup = retained.call(component, 80);
+			unsubscribe();
+		};
+	};
+	const runtime = owner("tui", bus); runtime.start();
+	retained = proto.render;
+	let calls = 0;
+	for (const key of [DYNAMIC, DYNAMIC_RIGHT]) {
+		discover(bus).register({ key, render: () => { calls++; return "DYNAMIC"; } });
+	}
+	component.render(80);
+	assert.equal(calls, 2);
+	runtime.stop(); runtime.invalidate();
+	assert.deepEqual(duringCleanup, before);
+	assert.equal(calls, 2);
+	assert.equal(bus.count(DISCOVER), 0);
 });

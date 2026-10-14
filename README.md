@@ -85,12 +85,11 @@ pending requests where possible during `session_shutdown`. Ensure late results
 cannot publish after shutdown. Clear keys using the context passed to the
 shutdown handler; do not reuse a context from an earlier session.
 
-## Optional width-aware left producers
+## Optional width-aware producers
 
-Use this capability only when a left segment needs to choose its format from the
-space actually available—for example, switching from per-item characters to
-counts. Static producers do not need it or any changes to their existing code.
-Dynamic right segments are not supported.
+Use this capability when a left or right segment needs to choose its format from
+its available space—for example, switching from per-item characters to counts. Static producers do not need it or any changes to their existing code.
+Both sides use the same capability; the status key determines placement.
 
 Discover the capability through Pi's public `pi.events` bus. Do not import this
 package or depend on its installation path. The shared structural types are:
@@ -98,26 +97,30 @@ package or depend on its installation path. The shared structural types are:
 ```ts
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
-type DynamicLeftRenderer = (input: {
+type DynamicRenderer = (input: {
   maxWidth: number;
   theme: Theme;
 }) => string | undefined;
 
-interface DynamicLeftCapabilityV1 {
+interface DynamicProducerCapabilityV1 {
   version: 1;
   instanceId: string;
   register(input: {
     key: string;
-    render: DynamicLeftRenderer;
+    render: DynamicRenderer;
   }): () => void;
 }
 ```
 
 | Channel | Payload | Sender |
 |---|---|---|
-| `footer-compositor:dynamic-left:discover` | `{ version: 1, accept: (capability: DynamicLeftCapabilityV1) => void }` | Producer |
-| `footer-compositor:dynamic-left:available` | `DynamicLeftCapabilityV1` | Compositor |
-| `footer-compositor:dynamic-left:unavailable` | `{ version: 1, instanceId: string }` | Compositor |
+| `footer-compositor:dynamic:discover` | `{ version: 1, accept: (capability: DynamicProducerCapabilityV1) => void }` | Producer |
+| `footer-compositor:dynamic:available` | `DynamicProducerCapabilityV1` | Compositor |
+| `footer-compositor:dynamic:unavailable` | `{ version: 1, instanceId: string }` | Compositor |
+
+The earlier `footer-compositor:dynamic-left:*` prototype channels are not handled.
+Prototype producers must switch to the shared channels above; status keys and
+static producers do not change.
 
 Subscribe during `session_start`, then emit discover. An installed compositor
 responds synchronously; its available announcement handles the opposite start
@@ -129,16 +132,16 @@ not package versions. Unsubscribe and release them during `session_shutdown`.
 
 ### Registration and fallback
 
-Always publish a nonempty static fallback under the **same left status key**.
+Always publish a nonempty static fallback under the **same status key**.
 Registration overrides that value's rendering; it does not add another status.
 Clearing the status with `undefined` hides the segment even while registered.
 Republish fallback after registration, cached-data updates and unregistration:
 Pi's `setStatus()` requests a render even when its text has not changed. Registry
 changes otherwise take effect on the next render.
 
-`register()` accepts a valid left key with a finite numeric order and a callable
-renderer. Invalid arguments throw `TypeError`; a retired capability throws
-`Error`. Keep static fallback if registration fails. Re-registering a key replaces
+`register()` accepts a valid left or right key with a finite numeric order and
+a callable renderer. Invalid arguments throw `TypeError`; a retired capability
+throws `Error`. Keep static fallback if registration fails. Re-registering a key replaces
 its renderer. Disposers are idempotent and cannot remove a newer registration.
 
 Without a compositor, or with an older compositor lacking this capability, the
@@ -166,38 +169,60 @@ unsupported Pi footer or a custom replacement footer.
   bounded and deduplicated per registration and failure kind. Valid output is
   never truncated after formatting.
 
-The compositor chooses right statuses using the existing priority rules, then
-reserves space for static left values, separators and up to 12 columns of
-path/session text. Dynamic producers receive the remaining pool in ascending
-numeric order, with the full key breaking ties. Each receives what earlier
-producers left unused; an earlier producer may consume the whole pool. Fallback
-length does not affect its budget. Unused space expands the path/session text.
-Separator reservations for empty outputs are not reassigned to other dynamic
-producers within that render. Impossible static layouts retain static clipping.
+Allocation is **right first, then left**, without a second formatting pass:
+
+1. **Right:** reserve the existing 12-column minimum left area and two-column
+   left/right padding. Allocate the rest in descending numeric order, with the
+   larger full key first on ties. Dynamic renderers receive the remaining budget
+   after allowing for a separator when higher-priority right text is present.
+   Nonempty output consumes its width and that separator; empty output consumes
+   neither. Static right values are indivisible: if one cannot fit, it and all
+   lower-priority segments are dropped, matching the existing priority rule.
+   Retained right segments are displayed in ascending order with dim bullets.
+2. **Left:** use the space left by the completed right side. Reserve static left
+   values, separators and up to 12 columns of path/session text. Allocate the
+   remaining pool in ascending numeric order, with the smaller full key first
+   on ties. Each dynamic renderer receives what earlier left renderers left
+   unused. Unused space expands the path/session text. Reservations for empty
+   left segments' separators are not reassigned to dynamic renderers within
+   that render. Impossible static layouts retain static clipping.
+
+A high-priority right renderer may consume the entire right budget, displacing
+lower-priority right statuses and leaving no budget for dynamic left values.
+The 12-column right-side reservation protects the whole left area, not 12 columns
+of base text plus every left marker. Empty right output frees space for the left
+side; if all right output is empty, the left/right padding is also released.
+A renderer's fallback length never determines its budget. Higher-priority output
+can affect later budgets, but a renderer's own output does not change its budget.
+
+Without a present dynamic status on a side, that side uses its unchanged static
+layout. Registering a renderer alone does not make a status present.
 
 ### Complete producer example
 
 This synthetic producer switches between a strip and counts. Replace the demo
 command with your own observation code; update cached strings and publish outside
 the renderer. Include the structural declarations above in your extension.
+For right placement, change `KEY` to `footer-compositor:right:20:my-monitor`;
+discovery and registration stay the same.
 
 ```ts
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 const KEY = "footer-compositor:left:20:my-monitor";
-const PREFIX = "footer-compositor:dynamic-left:";
+const PREFIX = "footer-compositor:dynamic:";
 
 export default function (pi: ExtensionAPI) {
   let active = false;
   let strip = "WWII";
   let counts = "W2 I2";
-  let capability: DynamicLeftCapabilityV1 | undefined;
+  let capability: DynamicProducerCapabilityV1 | undefined;
   let unregister: (() => void) | undefined;
   let publish: (() => void) | undefined;
   let subscriptions: Array<() => void> = [];
 
-  const render: DynamicLeftRenderer = ({ maxWidth, theme }) => {
+  const render: DynamicRenderer = ({ maxWidth, theme }) => {
     const text = visibleWidth(strip) <= maxWidth ? strip
       : visibleWidth(counts) <= maxWidth ? counts
       : maxWidth > 0 ? "…" : "";
@@ -206,7 +231,7 @@ export default function (pi: ExtensionAPI) {
 
   function accept(payload: unknown) {
     if (!active || !payload || typeof payload !== "object") return;
-    const next = payload as DynamicLeftCapabilityV1;
+    const next = payload as DynamicProducerCapabilityV1;
     if (next.version !== 1 || typeof next.instanceId !== "string" ||
         !next.instanceId || typeof next.register !== "function" ||
         next.instanceId === capability?.instanceId) return;

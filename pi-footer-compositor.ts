@@ -5,7 +5,7 @@
  *
  * Strategy: be the sole owner of the unsupported
  * `FooterComponent.prototype.render` patch. Producers use public status keys
- * and optionally discover a width-aware left renderer through `pi.events`.
+ * and optionally discover a width-aware renderer through `pi.events`.
  * Preserve ordinary statuses and drop lower-order right segments first.
  *
  * Author: thias <github.attic@typedef.net>, OpenAI Codex (5.6)
@@ -23,25 +23,25 @@ const STATUS_KEY_PATTERN = /^footer-compositor:(left|right):(-?\d+):(.+)$/;
 const PATCH_KEY = "__piFooterCompositorRenderPatch";
 const MIN_PADDING = 2;
 const MIN_LEFT_WIDTH = 12;
-const DISCOVER = "footer-compositor:dynamic-left:discover";
-const AVAILABLE = "footer-compositor:dynamic-left:available";
-const UNAVAILABLE = "footer-compositor:dynamic-left:unavailable";
+const DISCOVER = "footer-compositor:dynamic:discover";
+const AVAILABLE = "footer-compositor:dynamic:available";
+const UNAVAILABLE = "footer-compositor:dynamic:unavailable";
 const SGR_PATTERN = /\x1b\[[0-9;:]*m/g;
 const CONTROL_PATTERN = /[\x00-\x1f\x7f-\x9f\u2028\u2029]/u;
 
 type FooterRender = (this: FooterComponent, width: number) => string[];
 type Slot = "left" | "right";
-type DynamicLeftRenderer = (input: { maxWidth: number; theme: Theme }) => string | undefined;
+type DynamicRenderer = (input: { maxWidth: number; theme: Theme }) => string | undefined;
 
-interface DynamicLeftCapabilityV1 {
+interface DynamicProducerCapabilityV1 {
 	version: 1;
 	instanceId: string;
-	register(input: { key: string; render: DynamicLeftRenderer }): () => void;
+	register(input: { key: string; render: DynamicRenderer }): () => void;
 }
 
 interface Registration {
 	token: symbol;
-	render: DynamicLeftRenderer;
+	render: DynamicRenderer;
 	diagnosed: Set<string>;
 }
 
@@ -180,27 +180,55 @@ function composeDynamicLeft(line: string, segments: Segment[], width: number, ow
 	return truncateToWidth(line, width - suffixWidth, "...") + suffix;
 }
 
+function composeDynamicRight(segments: Segment[], width: number, separator: string, owner: FooterOwner, theme: Theme): string {
+	const joiner = ` ${separator} `;
+	const separatorWidth = visibleWidth(joiner);
+	let remaining = Math.max(0, width - MIN_LEFT_WIDTH - MIN_PADDING);
+	const rendered: Segment[] = [];
+	// Allocate highest priority first, then restore ascending display order.
+	for (const segment of [...segments].reverse()) {
+		const gap = rendered.length > 0 ? separatorWidth : 0;
+		const budget = Math.max(0, remaining - gap);
+		const registration = owner.registry.get(segment.key);
+		const text = registration ? renderDynamic(owner, segment.key, registration, budget, theme) : segment.text;
+		if (!text) continue;
+		const textWidth = visibleWidth(text);
+		// Static values are indivisible. As in the legacy policy, a value that
+		// cannot fit also excludes everything with lower priority.
+		if (textWidth + gap > remaining) break;
+		rendered.push({ ...segment, text });
+		remaining -= textWidth + gap;
+	}
+	return rendered.reverse().map((segment) => segment.text).join(joiner);
+}
+
 function composeFirstLine(line: string, leftSegments: Segment[], rightSegments: Segment[], width: number,
 	separator: string, owner: FooterOwner, theme: Theme): string {
-	const dynamic = leftSegments.some((segment) => owner.registry.has(segment.key));
-	if (width <= 0 && !dynamic) return truncateToWidth(line, width, "");
+	const dynamicLeft = leftSegments.some((segment) => owner.registry.has(segment.key));
+	const dynamicRight = rightSegments.some((segment) => owner.registry.has(segment.key));
+	if (width <= 0 && !dynamicLeft && !dynamicRight) return truncateToWidth(line, width, "");
 
-	// Keep the existing right-side selection policy for both layout paths.
-	const visibleSegments = [...rightSegments];
-	let right = visibleSegments.map((segment) => segment.text).join(` ${separator} `);
-	while (visibleSegments.length > 0 && visibleWidth(right) + MIN_PADDING + MIN_LEFT_WIDTH > width) {
-		visibleSegments.shift();
+	let right: string;
+	if (dynamicRight) {
+		right = composeDynamicRight(rightSegments, width, separator, owner, theme);
+	} else {
+		// Preserve the exact legacy selection path without present right renderers.
+		const visibleSegments = [...rightSegments];
 		right = visibleSegments.map((segment) => segment.text).join(` ${separator} `);
+		while (visibleSegments.length > 0 && visibleWidth(right) + MIN_PADDING + MIN_LEFT_WIDTH > width) {
+			visibleSegments.shift();
+			right = visibleSegments.map((segment) => segment.text).join(` ${separator} `);
+		}
 	}
 	const availableLeft = Math.max(0, width - (right ? visibleWidth(right) + MIN_PADDING : 0));
-	const left = dynamic
+	const left = dynamicLeft
 		? composeDynamicLeft(line, leftSegments, availableLeft, owner, theme)
 		: appendLeftSegments(line, leftSegments, availableLeft);
 	if (!right) return left;
 	const padding = " ".repeat(Math.max(MIN_PADDING, width - visibleWidth(left) - visibleWidth(right)));
-	// Dynamic output already fits; only the legacy static path needs final clipping.
+	// Both allocation paths already fit. Never clip compliant dynamic output.
 	const result = left + padding + right;
-	return dynamic ? result : truncateToWidth(result, width, "");
+	return dynamicLeft || dynamicRight ? result : truncateToWidth(result, width, "");
 }
 
 function installPatch(owner: FooterOwner): () => void {
@@ -227,7 +255,9 @@ function installPatch(owner: FooterOwner): () => void {
 			if (segments.length === 0) return lines;
 
 			const currentOwner = [...owners].at(-1)!;
-			const theme = currentOwner.getTheme!();
+			// Cleanup can synchronously re-enter rendering through an unsubscribe.
+			if (!currentOwner.active || !currentOwner.getTheme) return lines;
+			const theme = currentOwner.getTheme();
 			const result = lines.slice(0, 2);
 			result[0] = composeFirstLine(
 				result[0]!,
@@ -258,18 +288,18 @@ function installPatch(owner: FooterOwner): () => void {
 	};
 }
 
-function createCapability(owner: FooterOwner): DynamicLeftCapabilityV1 {
+function createCapability(owner: FooterOwner): DynamicProducerCapabilityV1 {
 	return {
 		version: 1,
 		instanceId: randomUUID(),
 		register(input) {
-			if (!owner.active) throw new Error("Dynamic-left capability is retired");
+			if (!owner.active) throw new Error("Width-aware capability is retired");
 			if (!input || typeof input.key !== "string" || typeof input.render !== "function") {
-				throw new TypeError("Expected a left status key and callable renderer");
+				throw new TypeError("Expected a compositor status key and callable renderer");
 			}
 			const match = STATUS_KEY_PATTERN.exec(input.key);
-			if (!match || match[1] !== "left" || !Number.isFinite(Number(match[2]))) {
-				throw new TypeError("Expected footer-compositor:left:<order>:<id> with a finite order");
+			if (!match || !Number.isFinite(Number(match[2]))) {
+				throw new TypeError("Expected footer-compositor:left|right:<order>:<id> with a finite order");
 			}
 			const key = input.key;
 			const token = Symbol(key);
